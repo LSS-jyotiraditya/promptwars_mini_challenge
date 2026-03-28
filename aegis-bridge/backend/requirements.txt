@@ -10,3 +10,7 @@ chromadb
 neo4j
 numpy
 pypdf
+torch
+sentence-transformers
+uvloop
+watchfiles
