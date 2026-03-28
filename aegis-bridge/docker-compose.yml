@@ -1,0 +1,32 @@
+services:
+  # Aegis Bridge - Crisis Triage App
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=gemma3:12b
+    env_file:
+      - backend/.env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - ollama
+
+  # Ollama - LLM Hosting
+  # Note: Requires GPU for performance. If running on local CPU, this may be slow.
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./ollama_data:/root/.ollama
+    # If using NVIDIA GPU, uncomment lines below:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]

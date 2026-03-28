@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Aegis Bridge - Gemini-Powered Crisis Triage & Response Platform">
+    <title>Aegis Bridge | Crisis Triage Platform</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
+</head>
+
+<body>
+    <div class="app-layout">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="logo-container">
+                    <div class="logo-icon">🛡️</div>
+                    <div class="logo-text">
+                        <h1>Aegis Bridge</h1>
+                        <span>Crisis Triage Platform</span>
+                    </div>
+                </div>
+            </div>
+
+            <nav class="sidebar-nav">
+                <a class="nav-item active" data-view="dashboard" onclick="navigateTo('dashboard')">
+                    <span class="nav-icon">📊</span>
+                    Dashboard
+                </a>
+                <a class="nav-item" data-view="new-incident" onclick="navigateTo('new-incident')">
+                    <span class="nav-icon">🆘</span>
+                    New Incident
+                </a>
+                <a class="nav-item" data-view="incidents" onclick="navigateTo('incidents')">
+                    <span class="nav-icon">📋</span>
+                    All Incidents
+                </a>
+                <a class="nav-item" data-view="actions" onclick="navigateTo('actions')">
+                    <span class="nav-icon">⚡</span>
+                    Action Queue
+                    <span class="nav-badge" id="pending-badge" style="display:none">0</span>
+                </a>
+
+                <div class="nav-divider"></div>
+
+                <a class="nav-item" data-view="audit" onclick="navigateTo('audit')">
+                    <span class="nav-icon">📜</span>
+                    Audit Trail
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="gemini-badge">
+                    <span class="dot"></span>
+                    Powered by Gemma 3, a Google Model
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <div class="content-header" id="content-header">
+                <h2>Dashboard</h2>
+                <p>Real-time crisis monitoring and triage overview</p>
+            </div>
+
+            <div class="content-body" id="content-body">
+                <!-- Dynamic content rendered here by app.js -->
+            </div>
+        </main>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+
+</html>

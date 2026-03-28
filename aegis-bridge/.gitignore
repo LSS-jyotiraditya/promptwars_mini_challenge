@@ -1,0 +1,23 @@
+# Aegis Bridge - Ignore
+venv/
+.env
+__pycache__/
+*.db
+*.log
+data/
+node_modules/
+dist/
+.DS_Store
+*.pyc
+*.pyo
+google-cloud-sdk/
+google-cloud-cli-linux-x86_64.tar.gz
+server.log
+backend/server.log
+**/venv/
+**/.env
+**/google-cloud-sdk/
+**/__pycache__/
+**/data/
+**/*.db
+**/*.log
