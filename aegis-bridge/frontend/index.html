@@ -4,9 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="description" content="Aegis Bridge - Gemini-Powered Crisis Triage & Response Platform">
+    <meta name="description" content="Aegis Bridge - AI-Powered Crisis Triage & Response Platform for India">
     <title>Aegis Bridge | Crisis Triage Platform</title>
     <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <link rel="icon"
         href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🛡️</text></svg>">
 </head>
@@ -29,6 +33,11 @@
                 <a class="nav-item active" data-view="dashboard" onclick="navigateTo('dashboard')">
                     <span class="nav-icon">📊</span>
                     Dashboard
+                </a>
+                <a class="nav-item" data-view="voice-bot" onclick="navigateTo('voice-bot')">
+                    <span class="nav-icon">🎙️</span>
+                    Voice Emergency
+                    <span class="nav-badge live-badge">LIVE</span>
                 </a>
                 <a class="nav-item" data-view="new-incident" onclick="navigateTo('new-incident')">
                     <span class="nav-icon">🆘</span>
@@ -55,7 +64,7 @@
             <div class="sidebar-footer">
                 <div class="gemini-badge">
                     <span class="dot"></span>
-                    Powered by Gemma 3, a Google Model
+                    Powered by Gemini 2.0 Flash
                 </div>
             </div>
         </aside>

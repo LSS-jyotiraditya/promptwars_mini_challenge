@@ -239,6 +239,17 @@ def get_incident_detail(incident_id):
     conn.close()
     return incident
 
+def get_actions_for_incident(incident_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM actions WHERE incident_id = ? ORDER BY created_at", (incident_id,))
+    actions = [dict(r) for r in cursor.fetchall()]
+    for a in actions:
+        if a.get("payload"):
+            a["payload"] = json.loads(a["payload"])
+    conn.close()
+    return actions
+
 
 def get_pending_actions():
     conn = get_connection()

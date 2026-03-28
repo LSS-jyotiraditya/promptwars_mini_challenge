@@ -6,8 +6,8 @@ Orchestrates crisis analysis workflow: ingestion → Gemini analysis → structu
 import os
 import json
 from typing import Optional
-from . import database as db
-from . import ai_service
+import backend.database as db
+import backend.ai_service as ai_service
 
 
 async def process_incident(
@@ -19,22 +19,36 @@ async def process_incident(
     location: Optional[str] = None
 ):
     """
-    Full triage pipeline for an incident.
-    1. Calls AI Service for multimodal analysis
-    2. Stores triage results
-    3. Creates action items for human approval
+    Full triage pipeline for an incident with RAG & Knowledge Graph.
+    1. Retrieval: Find similar past incidents (Vector DB) and related entities (Graph)
+    2. Analysis: AI analysis with context
+    3. Storage: Store results and sync to graph/vector DB
     """
+    import backend.knowledge_service as ks
+    
     try:
-        # Step 1: AI Analysis
+        # Step 1: Retrieval (RAG)
+        context_query = f"{text_input or ''} {audio_transcript or ''} {location or ''}".strip()
+        past_incidents = await ks.query_related_incidents(context_query, n_results=2)
+        
+        # Format context for AI
+        context_str = ""
+        if past_incidents:
+            context_str = "\n\nRELATED PAST INCIDENTS (for context):\n"
+            for p in past_incidents:
+                severity = p['metadata'].get('severity', 'unknown')
+                context_str += f"- [{severity.upper()}] {p['text'][:200]}...\n"
+
+        # Step 2: AI Analysis
         result, raw_response = await ai_service.analyze_crisis(
             vertical=vertical,
-            text_input=text_input,
+            text_input=f"{text_input}\n{context_str}" if context_str else text_input,
             image_data=image_data,
             audio_transcript=audio_transcript,
             location=location
         )
 
-        # Step 2: Extract fields from AI response
+        # Step 3: Extract fields
         severity = result.get("severity", "medium")
         confidence = result.get("confidence", 0.5)
         summary = result.get("summary", "Analysis completed.")
@@ -44,7 +58,7 @@ async def process_incident(
         recommended_actions = result.get("recommended_actions", [])
         citations = result.get("citations", [])
 
-        # Step 3: Store triage result
+        # Step 4: Store triage result
         db.insert_triage_result(
             incident_id=incident_id,
             severity=severity,
@@ -56,7 +70,11 @@ async def process_incident(
             raw_response=raw_response
         )
 
-        # Step 4: Create actionable items for human approval
+        # Step 5: Sync to Knowledge Bases (Background/Async)
+        await ks.upsert_incident_embedding(incident_id, context_query, {"severity": severity, "vertical": vertical})
+        await ks.sync_incident_to_graph(incident_id, {"title": summary, "vertical": vertical, "severity": severity, "location": location})
+
+        # Step 6: Create actionable items for human approval
         for action in recommended_actions:
             db.insert_action(
                 incident_id=incident_id,
@@ -75,24 +93,33 @@ async def process_incident(
         }
 
     except Exception as e:
-        # Log the error and mark incident for manual review
-        db.insert_triage_result(
-            incident_id=incident_id,
-            severity="high",
-            summary=f"AI triage failed: {str(e)}. Manual review required.",
-            structured_output={"error": str(e)},
-            recommended_actions=[],
-            citations=[],
-            confidence=0.0,
-            raw_response=str(e)
-        )
-        db.insert_action(
-            incident_id=incident_id,
-            action_type="manual_review",
-            description=f"AI triage failed. Manual review required. Error: {str(e)[:200]}",
-            priority="high",
-            payload={"error": str(e)}
-        )
+        print(f"❌ Error during incident triage: {str(e)}")
+        # Check if triage result already exists before attempting error record
+        # In case it failed AFTER the first insert in Step 4
+        existing = db.get_incident_detail(incident_id)
+        if not (existing and existing.get("triage")):
+            db.insert_triage_result(
+                incident_id=incident_id,
+                severity="high",
+                summary=f"AI triage failed: {str(e)}. Manual review required.",
+                structured_output={"error": str(e)},
+                recommended_actions=[],
+                citations=[],
+                confidence=0.0,
+                raw_response=str(e)
+            )
+        
+        # Always try to insert a manual review action if no actions were created yet
+        actions = db.get_actions_for_incident(incident_id) if incident_id else []
+        if not actions:
+            db.insert_action(
+                incident_id=incident_id,
+                action_type="manual_review",
+                description=f"AI triage failed. Manual review required. Error: {str(e)[:200]}",
+                priority="high",
+                payload={"error": str(e)}
+            )
+            
         return {
             "status": "error",
             "error": str(e),

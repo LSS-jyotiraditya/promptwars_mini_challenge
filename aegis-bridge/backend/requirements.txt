@@ -4,4 +4,9 @@ python-multipart
 pydantic
 aiofiles
 python-dotenv
+google-genai
 ollama
+chromadb
+neo4j
+numpy
+pypdf

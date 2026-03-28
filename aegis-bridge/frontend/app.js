@@ -1,6 +1,7 @@
 /**
  * Aegis Bridge - Frontend Application
  * Single-Page Application with hash-based routing
+ * Features: Dashboard, Voice Bot (STT/TTS), New Incident, Action Queue, Audit Trail
  */
 
 const API_BASE = '/api';
@@ -10,10 +11,21 @@ const API_BASE = '/api';
 let currentView = 'dashboard';
 let pendingCount = 0;
 
+// Voice Bot State
+let voiceRecognition = null;
+let voiceIsListening = false;
+let voiceTranscript = '';
+let voiceSelectedVertical = 'emergency';
+
 // ── Router ─────────────────────────────────────────────────────
 
 function navigateTo(view, params = {}) {
     currentView = view;
+
+    // Stop voice if navigating away
+    if (view !== 'voice-bot' && voiceIsListening) {
+        stopVoiceRecording();
+    }
 
     // Update nav
     document.querySelectorAll('.nav-item').forEach(el => {
@@ -23,6 +35,7 @@ function navigateTo(view, params = {}) {
     // Update header
     const headers = {
         dashboard: { title: 'Dashboard', desc: 'Real-time crisis monitoring and triage overview' },
+        'voice-bot': { title: '🎙️ Voice Emergency', desc: 'Speak to report an emergency — AI transcribes, triages, and responds' },
         'new-incident': { title: 'New Incident', desc: 'Report a new crisis event for AI-powered triage' },
         incidents: { title: 'All Incidents', desc: 'Browse and search all crisis incidents' },
         actions: { title: 'Action Queue', desc: 'Review and approve AI-recommended actions' },
@@ -39,6 +52,7 @@ function navigateTo(view, params = {}) {
 
     switch (view) {
         case 'dashboard': renderDashboard(); break;
+        case 'voice-bot': renderVoiceBot(); break;
         case 'new-incident': renderNewIncident(); break;
         case 'incidents': renderIncidents(); break;
         case 'actions': renderActions(); break;
@@ -52,13 +66,19 @@ function navigateTo(view, params = {}) {
 
 async function api(endpoint, options = {}) {
     try {
-        const res = await fetch(`${API_BASE}${endpoint}`, options);
+        const url = `${API_BASE}${endpoint}`;
+        const res = await fetch(url, options);
         if (!res.ok) {
+            console.error(`API status error: ${res.status} for ${url}`);
             const error = await res.json().catch(() => ({ detail: res.statusText }));
-            throw new Error(error.detail || 'API error');
+            throw new Error(error.detail || `Server Error ${res.status}`);
         }
         return await res.json();
     } catch (err) {
+        if (err.name === 'TypeError' && err.message === 'Failed to fetch') {
+            console.error('Network Error: Check if server is reachable and CORS settings.');
+            throw new Error('Network connection failed. Check server status.');
+        }
         console.error('API Error:', err);
         throw err;
     }
@@ -97,6 +117,298 @@ async function updatePendingBadge() {
     } catch { /* silent */ }
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// ── VOICE BOT (STT + TTS) ─────────────────────────────────────
+// Uses browser's Web Speech API (FREE — zero tokens for STT/TTS)
+// Only the transcript text is sent to Gemini for triage
+// ══════════════════════════════════════════════════════════════════
+
+function renderVoiceBot() {
+    const body = document.getElementById('content-body');
+
+    const supported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
+
+    body.innerHTML = `
+        <div class="voice-bot-container">
+            <div class="voice-hero animate-in">
+                <div class="voice-visual">
+                    <div class="voice-ring ring-1"></div>
+                    <div class="voice-ring ring-2"></div>
+                    <div class="voice-ring ring-3"></div>
+                    <button class="voice-btn ${!supported ? 'disabled' : ''}" id="voice-main-btn" onclick="toggleVoice()">
+                        <span class="voice-btn-icon" id="voice-btn-icon">🎙️</span>
+                    </button>
+                </div>
+                <div class="voice-status" id="voice-status">
+                    ${supported
+            ? 'Tap the microphone and describe your emergency'
+            : '⚠️ Voice not supported in this browser. Use Chrome or Edge.'}
+                </div>
+                <div class="voice-hint" id="voice-hint">Your speech is transcribed locally — only text is sent to AI</div>
+            </div>
+
+            <div class="voice-controls animate-in">
+                <div class="voice-vertical-selector">
+                    <span class="voice-label">Report Type:</span>
+                    <button class="voice-type-btn selected" data-vtype="emergency" onclick="setVoiceVertical(this)">🚨 Emergency</button>
+                    <button class="voice-type-btn" data-vtype="healthcare" onclick="setVoiceVertical(this)">🏥 Medical</button>
+                    <button class="voice-type-btn" data-vtype="disaster" onclick="setVoiceVertical(this)">🌊 Disaster</button>
+                </div>
+            </div>
+
+            <div class="voice-transcript-box animate-in" id="voice-transcript-box" style="display:none;">
+                <div class="transcript-header">
+                    <span>📝 Live Transcript</span>
+                    <button class="btn btn-outline btn-sm" onclick="clearTranscript()">Clear</button>
+                </div>
+                <div class="transcript-content" id="voice-transcript-content">
+                    <span class="transcript-interim" id="voice-interim"></span>
+                </div>
+                <div class="transcript-actions" id="transcript-actions" style="display:none;">
+                    <button class="btn btn-primary" id="voice-submit-btn" onclick="submitVoiceTriage()">
+                        🚀 Submit for AI Triage
+                    </button>
+                </div>
+            </div>
+
+            <div class="voice-response-box animate-in" id="voice-response-box" style="display:none;">
+                <div class="response-header">
+                    <span id="response-severity-icon">🔴</span>
+                    <span id="response-severity-text">CRITICAL</span>
+                    <button class="btn btn-outline btn-sm" id="voice-speak-btn" onclick="speakResponse()">🔊 Listen</button>
+                </div>
+                <div class="response-summary" id="response-summary"></div>
+                <div class="response-actions" id="response-actions-count"></div>
+                <button class="btn btn-outline btn-sm" id="voice-view-detail" style="display:none;" onclick="viewVoiceIncident()">
+                    📋 View Full Triage Details
+                </button>
+            </div>
+        </div>
+    `;
+}
+
+let voiceIncidentId = null;
+
+function setVoiceVertical(el) {
+    document.querySelectorAll('.voice-type-btn').forEach(b => b.classList.remove('selected'));
+    el.classList.add('selected');
+    voiceSelectedVertical = el.dataset.vtype;
+}
+
+function toggleVoice() {
+    if (voiceIsListening) {
+        stopVoiceRecording();
+    } else {
+        startVoiceRecording();
+    }
+}
+
+function startVoiceRecording() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        showToast('Speech recognition not supported. Use Chrome or Edge.', 'error');
+        return;
+    }
+
+    voiceRecognition = new SpeechRecognition();
+    voiceRecognition.continuous = true;
+    voiceRecognition.interimResults = true;
+    voiceRecognition.lang = 'en-IN';  // Indian English
+    voiceRecognition.maxAlternatives = 1;
+
+    voiceRecognition.onstart = () => {
+        voiceIsListening = true;
+        const btn = document.getElementById('voice-main-btn');
+        const icon = document.getElementById('voice-btn-icon');
+        const status = document.getElementById('voice-status');
+        const hint = document.getElementById('voice-hint');
+        const box = document.getElementById('voice-transcript-box');
+
+        if (btn) btn.classList.add('listening');
+        if (icon) icon.textContent = '⏹️';
+        if (status) status.textContent = '🔴 Listening... Speak now';
+        if (status) status.classList.add('pulse-text');
+        if (hint) hint.textContent = 'Tap microphone again to stop recording';
+        if (box) box.style.display = 'block';
+    };
+
+    voiceRecognition.onresult = (event) => {
+        let interim = '';
+        let final = '';
+        for (let i = 0; i < event.results.length; i++) {
+            if (event.results[i].isFinal) {
+                final += event.results[i][0].transcript + ' ';
+            } else {
+                interim += event.results[i][0].transcript;
+            }
+        }
+        voiceTranscript = final.trim();
+
+        const content = document.getElementById('voice-transcript-content');
+        const interimEl = document.getElementById('voice-interim');
+        if (content) {
+            const finalHtml = voiceTranscript ? `<span class="transcript-final">${escapeHtml(voiceTranscript)}</span>` : '';
+            const interimHtml = interim ? `<span class="transcript-interim">${escapeHtml(interim)}</span>` : '';
+            content.innerHTML = finalHtml + interimHtml;
+        }
+
+        // Show submit button when we have final text
+        const actions = document.getElementById('transcript-actions');
+        if (actions && voiceTranscript.length > 5) {
+            actions.style.display = 'flex';
+        }
+    };
+
+    voiceRecognition.onerror = (event) => {
+        console.error('Speech error:', event.error);
+        if (event.error === 'not-allowed') {
+            showToast('Microphone access denied. Please allow microphone permissions.', 'error');
+        } else if (event.error === 'network') {
+            showToast('Browser requires internet for voice recognition. Try typing your report if offline.', 'error');
+            const box = document.getElementById('voice-transcript-box');
+            const actions = document.getElementById('transcript-actions');
+            if (box) box.style.display = 'block';
+            if (actions) actions.style.display = 'flex'; // Allow manual entry if possible (already supports it)
+        } else if (event.error !== 'no-speech') {
+            showToast(`Voice error: ${event.error}`, 'error');
+        }
+        stopVoiceRecording();
+    };
+
+    voiceRecognition.onend = () => {
+        // Auto-restart if still supposed to be listening
+        if (voiceIsListening && voiceRecognition) {
+            try { voiceRecognition.start(); } catch { }
+        }
+    };
+
+    try {
+        voiceRecognition.start();
+    } catch (e) {
+        showToast('Could not start speech recognition', 'error');
+    }
+}
+
+function stopVoiceRecording() {
+    voiceIsListening = false;
+    if (voiceRecognition) {
+        try { voiceRecognition.stop(); } catch { }
+        voiceRecognition = null;
+    }
+
+    const btn = document.getElementById('voice-main-btn');
+    const icon = document.getElementById('voice-btn-icon');
+    const status = document.getElementById('voice-status');
+    const hint = document.getElementById('voice-hint');
+
+    if (btn) btn.classList.remove('listening');
+    if (icon) icon.textContent = '🎙️';
+    if (status) {
+        status.textContent = voiceTranscript ? 'Recording stopped — review transcript below' : 'Tap the microphone and describe your emergency';
+        status.classList.remove('pulse-text');
+    }
+    if (hint) hint.textContent = voiceTranscript ? 'Submit the transcript for AI triage, or record more' : 'Your speech is transcribed locally — only text is sent to AI';
+}
+
+function clearTranscript() {
+    voiceTranscript = '';
+    const content = document.getElementById('voice-transcript-content');
+    const actions = document.getElementById('transcript-actions');
+    const responseBox = document.getElementById('voice-response-box');
+    if (content) content.innerHTML = '<span class="transcript-interim"></span>';
+    if (actions) actions.style.display = 'none';
+    if (responseBox) responseBox.style.display = 'none';
+}
+
+async function submitVoiceTriage() {
+    if (!voiceTranscript || voiceTranscript.length < 5) {
+        showToast('Please speak a description first', 'error');
+        return;
+    }
+
+    stopVoiceRecording();
+
+    const btn = document.getElementById('voice-submit-btn');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<div class="spinner" style="width:18px;height:18px;border-width:2px;"></div> AI Analyzing...';
+    }
+
+    try {
+        const result = await api('/voice-triage', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                transcript: voiceTranscript,
+                vertical: voiceSelectedVertical
+            })
+        });
+
+        voiceIncidentId = result.incident_id;
+
+        // Show response
+        const responseBox = document.getElementById('voice-response-box');
+        const severityIcon = document.getElementById('response-severity-icon');
+        const severityText = document.getElementById('response-severity-text');
+        const summaryEl = document.getElementById('response-summary');
+        const actionsCount = document.getElementById('response-actions-count');
+        const viewBtn = document.getElementById('voice-view-detail');
+
+        const icons = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢', info: '🔵' };
+
+        if (responseBox) responseBox.style.display = 'block';
+        if (severityIcon) severityIcon.textContent = icons[result.severity] || '⚪';
+        if (severityText) severityText.textContent = (result.severity || 'UNKNOWN').toUpperCase();
+        if (summaryEl) summaryEl.textContent = result.spoken_summary || result.summary;
+        if (actionsCount) actionsCount.textContent = `${result.actions_created} action(s) queued for human approval`;
+        if (viewBtn) viewBtn.style.display = 'inline-block';
+
+        showToast('Voice triage complete!', 'success');
+        updatePendingBadge();
+
+        // Auto-speak the response
+        speakResponse();
+
+    } catch (err) {
+        showToast(`Triage error: ${err.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '🚀 Submit for AI Triage';
+        }
+    }
+}
+
+function speakResponse() {
+    const summaryEl = document.getElementById('response-summary');
+    if (!summaryEl || !summaryEl.textContent) return;
+
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(summaryEl.textContent);
+        utterance.lang = 'en-IN';
+        utterance.rate = 0.95;
+        utterance.pitch = 1.0;
+
+        // Try to find a good voice
+        const voices = window.speechSynthesis.getVoices();
+        const preferred = voices.find(v => v.lang.startsWith('en') && v.name.includes('Google'));
+        if (preferred) utterance.voice = preferred;
+
+        window.speechSynthesis.speak(utterance);
+    } else {
+        showToast('Text-to-speech not supported in this browser', 'info');
+    }
+}
+
+function viewVoiceIncident() {
+    if (voiceIncidentId) {
+        navigateTo('incident-detail', { id: voiceIncidentId });
+    }
+}
+
+
 // ── Dashboard View ─────────────────────────────────────────────
 
 async function renderDashboard() {
@@ -111,6 +423,12 @@ async function renderDashboard() {
         const highCount = stats.by_severity?.high || 0;
 
         body.innerHTML = `
+            <div class="dashboard-map-header animate-in">
+                <h3>🌍 Global Crisis Situation Map</h3>
+                <span class="badge badge-info">Real-time Visualization</span>
+            </div>
+            <div id="dashboard-map" class="map-container animate-in"></div>
+
             <div class="stats-grid">
                 <div class="stat-card cyan animate-in">
                     <div class="stat-icon">📊</div>
@@ -176,7 +494,10 @@ async function renderDashboard() {
                         <div class="empty-icon">📭</div>
                         <h3>No incidents yet</h3>
                         <p>Create your first incident to see AI-powered triage in action.</p>
-                        <button class="btn btn-primary" style="margin-top:16px;" onclick="navigateTo('new-incident')">🆘 Create Incident</button>
+                        <div style="display:flex;gap:12px;margin-top:16px;justify-content:center;">
+                            <button class="btn btn-primary" onclick="navigateTo('voice-bot')">🎙️ Voice Report</button>
+                            <button class="btn btn-outline" onclick="navigateTo('new-incident')">🆘 Text Report</button>
+                        </div>
                     </div>
                 `}
             </div>
@@ -191,6 +512,10 @@ async function renderDashboard() {
                 </div>
             </div>
         `;
+
+        // Initialize Global Map
+        initGlobalMap(stats.recent_incidents || []);
+
     } catch (err) {
         body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><h3>Error loading dashboard</h3><p>${err.message}</p></div>`;
     }
@@ -224,7 +549,7 @@ function renderNewIncident() {
                         <div class="vertical-option selected" data-vertical="emergency" onclick="selectVertical(this)">
                             <div class="v-icon">🚨</div>
                             <div class="v-title">Emergency Response</div>
-                            <div class="v-desc">911, accidents, fires, crimes</div>
+                            <div class="v-desc">100/108, accidents, fires, crimes</div>
                         </div>
                         <div class="vertical-option" data-vertical="healthcare" onclick="selectVertical(this)">
                             <div class="v-icon">🏥</div>
@@ -452,11 +777,13 @@ function renderIncidentItem(incident) {
 
 async function renderIncidentDetail(id) {
     const body = document.getElementById('content-body');
+    const header = document.getElementById('content-header');
+
     try {
         const incident = await api(`/incidents/${id}`);
         const triage = incident.triage;
 
-        document.getElementById('content-header').innerHTML = `
+        header.innerHTML = `
             <h2>${escapeHtml(incident.title)}</h2>
             <p>Incident #${incident.id} — ${incident.vertical.toUpperCase()} — ${formatTime(incident.created_at)}</p>
         `;
@@ -466,6 +793,7 @@ async function renderIncidentDetail(id) {
         if (triage) {
             const severityIcons = { critical: '🔴', high: '🟠', medium: '🟡', low: '🟢', info: '🔵' };
 
+            // Severity Banner
             html += `
                 <div class="severity-banner ${triage.severity} animate-in">
                     <div class="severity-icon">${severityIcons[triage.severity] || '⚪'}</div>
@@ -475,8 +803,8 @@ async function renderIncidentDetail(id) {
                     </div>
                     <div class="confidence-meter" style="margin-left:auto;min-width:200px;">
                         <span style="font-size:0.75rem;color:var(--text-muted);">Confidence</span>
-                        <div class="confidence-bar"><div class="confidence-fill" style="width:${(triage.confidence_score || 0) * 100}%"></div></div>
-                        <span class="confidence-value">${((triage.confidence_score || 0) * 100).toFixed(0)}%</span>
+                        <div class="confidence-bar"><div class="confidence-fill" style="width:${(triage.confidence || 0) * 100}%"></div></div>
+                        <span class="confidence-value">${((triage.confidence || 0) * 100).toFixed(0)}%</span>
                     </div>
                 </div>
             `;
@@ -521,35 +849,69 @@ async function renderIncidentDetail(id) {
                 </div>
             `;
 
-            html += `</div>`;
-        }
+            html += `</div>`; // Close triage-detail
 
-        // Actions
-        if (incident.actions && incident.actions.length > 0) {
+            // Recommendations
+            if (incident.actions && incident.actions.length > 0) {
+                html += `
+                    <div class="glass-card animate-in" style="margin-top:24px;">
+                        <div class="card-header"><span class="card-title">⚡ Recommended Actions (Human-in-the-Loop)</span></div>
+                        ${incident.actions.map(a => renderActionCard(a)).join('')}
+                    </div>
+                `;
+            }
+
+            // Map
             html += `
                 <div class="glass-card animate-in" style="margin-top:24px;">
-                    <div class="card-header">
-                        <span class="card-title">⚡ Recommended Actions (Human-in-the-Loop)</span>
-                    </div>
-                    ${incident.actions.map(a => renderActionCard(a)).join('')}
+                    <div class="card-header"><span class="card-title">📍 Localized Triage Map</span></div>
+                    <div id="incident-map-container" class="map-container mini"></div>
                 </div>
             `;
+
+        } else {
+            // "Processing" State - Analysis hasn't finished yet
+            html += `
+                <div class="triage-loading-card animate-in" style="background:var(--bg-glass);padding:60px;text-align:center;border-radius:16px;border:1px solid rgba(255,255,255,0.05);margin-top:20px;backdrop-filter:blur(10px);">
+                    <div class="spinner" style="margin: 0 auto 30px;width:50px;height:50px;border-width:4px;"></div>
+                    <h2 style="color:var(--accent-glow);letter-spacing:1px;margin-bottom:12px;">🧠 Situational Intelligence Engine</h2>
+                    <p style="color:var(--text-secondary);max-width:550px;margin: 0 auto;font-size:1.1rem;line-height:1.6;">
+                        Our advanced models (Gemma-3 via Resilience Fallback) are currently triaging this report, 
+                        calculating risks, and synchronizing with the Global Knowledge Graph.
+                    </p>
+                    <div class="processing-steps" style="margin-top:40px;display:flex;justify-content:center;gap:30px;opacity:0.6;">
+                        <div class="step-item"><div class="badge badge-emergency">RAG Retrieval</div></div>
+                        <div class="step-item"><div class="badge badge-healthcare">Graph Sync</div></div>
+                        <div class="step-item"><div class="badge badge-disaster">Safety Audit</div></div>
+                    </div>
+                </div>
+            `;
+
+            // Poll for result every 4 seconds
+            setTimeout(() => {
+                if (window.location.hash === `#incident/${id}`) {
+                    renderIncidentDetail(id);
+                }
+            }, 4000);
         }
 
-        // Original Input
+        // Original Input Card (Always Show)
         html += `
             <div class="glass-card animate-in" style="margin-top:24px;">
-                <div class="card-header">
-                    <span class="card-title">📝 Original Input</span>
-                </div>
+                <div class="card-header"><span class="card-title">📝 Original Report Input</span></div>
                 <div style="background:var(--bg-primary);border:1px solid var(--border-color);border-radius:var(--radius-md);padding:16px;">
-                    <pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:0.82rem;color:var(--text-secondary);line-height:1.7;">${escapeHtml(incident.input_text || 'No text input')}</pre>
+                    <pre style="white-space:pre-wrap;font-family:var(--font-mono);font-size:0.85rem;color:var(--text-secondary);line-height:1.7;">${escapeHtml(incident.input_text || 'No text input provided')}</pre>
                 </div>
-                ${incident.location ? `<p style="margin-top:12px;color:var(--text-secondary);font-size:0.85rem;">📍 <strong>Location:</strong> ${escapeHtml(incident.location)}</p>` : ''}
+                ${incident.location ? `<p style="margin-top:16px;color:var(--text-muted);font-size:0.9rem;">📍 <strong>Reported Location:</strong> ${escapeHtml(incident.location)}</p>` : ''}
             </div>
         `;
 
         body.innerHTML = html;
+
+        // Initialize Map if triage is ready and location exists
+        if (triage && incident.location) {
+            initIncidentMap(incident);
+        }
 
     } catch (err) {
         body.innerHTML = `<div class="empty-state"><div class="empty-icon">⚠️</div><h3>Error loading incident</h3><p>${err.message}</p></div>`;
@@ -655,7 +1017,6 @@ async function handleAction(actionId, type) {
         else if (currentView === 'incident-detail') {
             const body = document.getElementById('content-body');
             const backBtn = body.querySelector('.back-btn');
-            // Re-render preserving context
             const match = body.innerHTML.match(/Incident #(\d+)/);
             if (match) renderIncidentDetail(parseInt(match[1]));
         }
@@ -766,4 +1127,96 @@ document.addEventListener('DOMContentLoaded', () => {
     updatePendingBadge();
     // Poll for pending actions every 30s
     setInterval(updatePendingBadge, 30000);
+    // Preload voices for TTS
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.getVoices();
+    }
 });
+
+// ── Maps & Geocoding ───────────────────────────────────────────
+
+let globalMap = null;
+
+function initGlobalMap(incidents) {
+    if (globalMap) globalMap.remove();
+
+    // Default center: India
+    globalMap = L.map('dashboard-map').setView([20.5937, 78.9629], 5);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(globalMap);
+
+    incidents.forEach(inc => {
+        if (inc.location) {
+            const coords = getCoordinates(inc.location);
+            const triage = inc.triage || {};
+            const severity = triage.severity || 'medium';
+            const icon = L.divIcon({
+                className: `marker-pin-${severity}`,
+                html: `<span>📍</span>`,
+                iconSize: [30, 42],
+                iconAnchor: [15, 42]
+            });
+
+            L.marker(coords, { icon })
+                .addTo(globalMap)
+                .bindPopup(`
+                    <strong>${escapeHtml(inc.title || inc.vertical)}</strong><br>
+                    Severity: <span class="badge badge-${severity}">${severity.toUpperCase()}</span><br>
+                    Location: ${escapeHtml(inc.location)}<br>
+                    <button onclick="navigateTo('incident-detail', {id:${inc.id}})" style="margin-top:5px;cursor:pointer;">View Detail</button>
+                `);
+        }
+    });
+}
+
+function initIncidentMap(incident) {
+    const mapDiv = document.getElementById('incident-map-container');
+    if (!mapDiv) return;
+
+    const coords = getCoordinates(incident.location);
+    const map = L.map('incident-map-container').setView(coords, 14);
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    const severity = (incident.triage && incident.triage.severity) || 'medium';
+    L.marker(coords).addTo(map)
+        .bindPopup(`<strong>Reported Location:</strong> ${escapeHtml(incident.location)}<br>Severity: ${severity}`)
+        .openPopup();
+}
+
+/**
+ * Geocoding Simulation (Mapping Indian landmarks/cities to coords)
+ * In a real app, this would call a Geocoding API (Pelias/Mapbox/Google)
+ */
+function getCoordinates(locationStr) {
+    const loc = locationStr.toLowerCase();
+
+    // Hardcoded common locations for demo
+    const database = {
+        'mumbai': [19.0760, 72.8777],
+        'delhi': [28.6139, 77.2090],
+        'bangalore': [12.9716, 77.5946],
+        'hyderabad': [17.3850, 78.4867],
+        'chennai': [13.0827, 80.2707],
+        'kolkata': [22.5726, 88.3639],
+        'pune': [18.5204, 73.8567],
+        'gateway of india': [18.9220, 72.8347],
+        'red fort': [28.6562, 77.2410],
+        'mg road': [12.9745, 77.6068],
+        'marina beach': [13.0418, 80.2824],
+        'howrah bridge': [22.5851, 88.3521],
+        'chandni chowk': [28.6659, 77.2307],
+        'palam': [28.5857, 77.0701]
+    };
+
+    for (const key in database) {
+        if (loc.includes(key)) return database[key];
+    }
+
+    // Default to a random-ish point in India if not found
+    return [20 + Math.random() * 5, 75 + Math.random() * 5];
+}
